@@ -1,0 +1,36 @@
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+
+# Python caches and local tooling
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.langgraph_api/
+
+# Development documents and tests
+docs/
+tests/
+pytest.ini
+frontend/src/*.test.*
+frontend/src/testSetup.ts
+
+# IDE and operating-system files
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Frontend dependencies and generated files
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+
+# Local models, source datasets, and generated data
+pretrained/
+data/knowledge_graph/
+data/processed*/
+data/vectorstore/

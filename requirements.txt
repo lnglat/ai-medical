@@ -1,0 +1,21 @@
+# Web API and configuration
+fastapi>=0.115,<1.0
+uvicorn[standard]>=0.30,<1.0
+pydantic>=2.9,<3.0
+pydantic-settings>=2.6,<3.0
+python-dotenv>=1.0,<2.0
+
+# Agent workflow and LLM integration
+langchain-core>=1.5,<2.0
+langgraph>=1.2,<2.0
+langchain-deepseek>=1.1,<2.0
+
+# Databases and retrieval
+neo4j>=6.2,<7.0
+chromadb>=1.5,<2.0
+pymysql>=1.1,<2.0
+
+# Local embeddings and model download
+numpy>=2.0,<3.0
+sentence-transformers>=5.7,<6.0
+huggingface-hub>=1.0,<2.0
