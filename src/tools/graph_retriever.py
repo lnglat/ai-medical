@@ -98,7 +98,7 @@ class Neo4jGraphRetriever:
     # 虽然写在类里面，但它不需要使用当前对象 self，把它当成普通函数使用
     @staticmethod
     def _to_evidence(row: Mapping[str, Any]) -> GraphEvidence:
-        """校验驱动返回字段，并对多段关系的来源记录稳定去重。"""
+        """ 把Neo4j 返回的一条记录转换为项目共享模型 GraphEvidence。"""
 
         try:
             return GraphEvidence(

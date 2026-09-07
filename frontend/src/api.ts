@@ -6,6 +6,12 @@ export interface TriageResult {
   should_continue_preconsult: boolean;
 }
 
+export interface PatientProfile {
+  age: number | null;
+  sex: "male" | "female" | "unknown";
+  pregnancy: boolean | null;
+}
+
 export interface WaitingUserResponse {
   conversation_status: "waiting_user";
   session_id: string;
@@ -170,10 +176,15 @@ export function sendMessage(
   sessionId: string,
   message: string,
   requestId: string,
+  patientProfile?: PatientProfile,
 ): Promise<ConsultationResponse> {
   return requestJson(`/sessions/${encodeURIComponent(sessionId)}/messages`, {
     method: "POST",
-    body: JSON.stringify({ message, request_id: requestId }),
+    body: JSON.stringify({
+      message,
+      request_id: requestId,
+      ...(patientProfile ? { patient_profile: patientProfile } : {}),
+    }),
   });
 }
 

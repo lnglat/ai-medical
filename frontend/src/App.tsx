@@ -4,17 +4,18 @@ import {
   getDependencyHealth,
   getSession,
   getTrace,
-  hasTraceData,
   sendMessage,
   type ConsultationResponse,
   type DemoTrace,
   type DependencyHealth,
+  type PatientProfile,
 } from "./api";
 import {
   EmergencyPanel,
   ErrorPanel,
   EvidencePanel,
   MessageList,
+  PreconsultStatus,
   ProgressBar,
   SummaryPanel,
   type ChatMessage,
@@ -55,6 +56,9 @@ export default function App() {
   const [sending, setSending] = useState(false);
   const [pageError, setPageError] = useState<ApiError | null>(null);
   const [inputError, setInputError] = useState("");
+  const [age, setAge] = useState("");
+  const [sex, setSex] = useState<PatientProfile["sex"]>("unknown");
+  const [pregnancy, setPregnancy] = useState<"unknown" | "yes" | "no">("unknown");
   const composing = useRef(false);
   const bottomRef = useRef<HTMLDivElement>(null);
 
@@ -101,7 +105,8 @@ export default function App() {
   const terminal = response?.conversation_status === "completed" ||
     response?.conversation_status === "emergency_ended" ||
     response?.conversation_status === "failed" || pageError?.kind === "conflict";
-  const traceAvailable = hasTraceData(trace);
+  // 首轮请求失败后 response 仍为空；重试时仍需携带相同的患者基础资料。
+  const isFirstTurn = response === null;
 
   async function submit(event?: FormEvent) {
     event?.preventDefault();
@@ -111,6 +116,18 @@ export default function App() {
       return;
     }
 
+    const parsedAge = age ? Number(age) : null;
+    if (isFirstTurn && parsedAge !== null && (!Number.isInteger(parsedAge) || parsedAge < 0 || parsedAge > 130)) {
+      setInputError("年龄应为 0 到 130 之间的整数。");
+      return;
+    }
+
+    const patientProfile: PatientProfile | undefined = isFirstTurn ? {
+      age: parsedAge,
+      sex,
+      pregnancy: sex === "male" ? null : pregnancy === "yes" ? true : pregnancy === "no" ? false : null,
+    } : undefined;
+
     setInputError("");
     setPageError(null);
     setSending(true);
@@ -118,7 +135,7 @@ export default function App() {
     const userMessage: ChatMessage = { id: newId(), role: "user", content: value };
     setMessages((current) => [...current, userMessage]);
     try {
-      const result = await sendMessage(sessionId, value, newId());
+      const result = await sendMessage(sessionId, value, newId(), patientProfile);
       setResponse(result);
       if (result.conversation_status === "waiting_user") {
         setMessages((current) => [
@@ -160,6 +177,9 @@ export default function App() {
     setTrace(null);
     setPageError(null);
     setInputError("");
+    setAge("");
+    setSex("unknown");
+    setPregnancy("unknown");
   }
 
   const dependencyLabel = dependency?.status === "ready" ? "就绪" :
@@ -181,7 +201,7 @@ export default function App() {
             <button className="secondary-button" type="button" onClick={resetConsultation}>新预问诊</button>
           </div>
         </div>
-        <ProgressBar response={response} hasError={Boolean(pageError)} traceAvailable={traceAvailable} />
+        <ProgressBar response={response} hasError={Boolean(pageError)} />
       </header>
 
       <main className="consultation">
@@ -189,7 +209,42 @@ export default function App() {
           <section className="welcome" aria-labelledby="welcome-title">
             <div className="welcome__index">01 / 风险初筛</div>
             <h1 id="welcome-title">开始一次预问诊</h1>
-            <p>我会先排查紧急风险，再逐步整理症状信息。请不要输入姓名、证件号、电话或住址。</p>
+            <p>系统会先检查紧急风险，再通过少量问题整理就诊信息。请不要输入姓名、证件号、电话或住址。</p>
+            <fieldset className="profile-fields">
+              <legend>风险相关资料 <small>选填，仅用于分诊与特殊人群识别</small></legend>
+              <div className="profile-fields__grid">
+                <label>
+                  <span>年龄</span>
+                  <input
+                    type="number"
+                    min="0"
+                    max="130"
+                    step="1"
+                    value={age}
+                    onChange={(event) => { setAge(event.target.value); setInputError(""); }}
+                    placeholder="例如 35"
+                  />
+                </label>
+                <label>
+                  <span>性别</span>
+                  <select value={sex} onChange={(event) => setSex(event.target.value as PatientProfile["sex"])}>
+                    <option value="unknown">不便说明</option>
+                    <option value="male">男</option>
+                    <option value="female">女</option>
+                  </select>
+                </label>
+                {sex !== "male" && (
+                  <label>
+                    <span>是否可能怀孕</span>
+                    <select value={pregnancy} onChange={(event) => setPregnancy(event.target.value as typeof pregnancy)}>
+                      <option value="unknown">不确定 / 不适用</option>
+                      <option value="yes">是</option>
+                      <option value="no">否</option>
+                    </select>
+                  </label>
+                )}
+              </div>
+            </fieldset>
             <div className="examples" aria-label="症状描述示例">
               {EXAMPLES.map((example) => (
                 <button type="button" key={example} onClick={() => setInput(example)}>{example}</button>
@@ -198,6 +253,7 @@ export default function App() {
           </section>
         )}
 
+        <PreconsultStatus response={response} />
         <MessageList messages={messages} />
         {response?.conversation_status === "completed" && (
           <SummaryPanel summary={response.summary} draft={response.medical_record_draft} />
@@ -221,13 +277,13 @@ export default function App() {
             onKeyDown={handleKeyDown}
             onCompositionStart={() => { composing.current = true; }}
             onCompositionEnd={() => { composing.current = false; }}
-            placeholder={terminal ? "本次问诊已结束" : "描述当前最主要的不适…"}
+            placeholder={terminal ? "本次问诊已结束" : isFirstTurn ? "描述当前最主要的不适…" : "回答当前问题…"}
             rows={2}
             maxLength={4000}
             disabled={sending || terminal}
           />
           <button type="submit" disabled={sending || terminal || !input.trim()}>
-            {sending ? "正在整理…" : "发送"}
+            {sending ? (isFirstTurn ? "正在筛查…" : "正在整理…") : (isFirstTurn ? "开始预问诊" : "提交回答")}
           </button>
         </form>
         {inputError && <p className="input-error" role="alert">{inputError}</p>}

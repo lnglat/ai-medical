@@ -193,7 +193,7 @@ class MedicalEntityNormalizer:
             score=max(0.0, min(1.0, 1.0 - numeric_distance)),
         )
 
-
+'''
 def normalize_medical_entity(text: str, entity_type: str) -> str | None:
     """旧的 MySQL 精确标准化兼容入口；新代码应注入 ``MedicalEntityNormalizer``。
 
@@ -211,3 +211,4 @@ def normalize_medical_entity(text: str, entity_type: str) -> str | None:
     if not row:
         return None
     return str(row["std_name"] if isinstance(row, Mapping) else row[1])
+    '''

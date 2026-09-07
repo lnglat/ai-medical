@@ -39,7 +39,7 @@ _LIST_FIELDS = {
     "allergy_history",
     "special_population",
 }
-# 先取得 ConsultationSlots 的所有字段，再减去列表字段，剩下的就是标量字段
+# 先取得 ConsultationSlots 的所有字段，再减去列表字段，剩下的就是标量字段(新值覆盖旧值)
 _SCALAR_FIELDS = set(ConsultationSlots.model_fields) - _LIST_FIELDS
 
 # 持续时间表

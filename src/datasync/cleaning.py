@@ -119,8 +119,7 @@ def clean_jsonl(path: Path, *, limit: int | None = None) -> tuple[list[CleanMedi
     cleaned: list[CleanMedicalRecord] = []
     rejected: list[RejectedRecord] = []
     source = path.as_posix() #避免 Windows 反斜杠路径在 JSON 中被转义
-    # 使用二进制逐行读取，确保单行 UTF-8 损坏时只拒绝该行，而不是由文本迭代器
-    # 在进入 try 之前抛错并中断整条流水线。
+    # 使用二进制逐行读取，确保单行 UTF-8 损坏时只拒绝该行，而不是由文本迭代器在进入 try 之前抛错并中断整条流水线。
     with path.open("rb") as stream:
         for line_number, raw_line in enumerate(stream, 1):
             if limit is not None and len(cleaned) + len(rejected) >= limit:

@@ -122,7 +122,7 @@ def validate_t2_artifacts(
     *,
     require_full: bool = True,
 ) -> ArtifactContractReport:
-    """在连接数据库之前独立验证 离线医学数据清洗、实体对齐与索引构建 阶段生成的 JSONL 文件和 manifest.json。
+    """在连接 MySQL、Chroma、Neo4j 之前，先验证离线数据是否可信、完整、相互一致。
 
     可插拔图谱 RAG 检索 不调用 离线医学数据清洗、实体对齐与索引构建 内部流水线函数，也不会尝试修复或重建产物。任何不一致都会阻止
     真实知识工具构建。校验包括关系方向、``source_records`` 列表、Chroma metadata、
@@ -271,7 +271,7 @@ def validate_t2_artifacts(
 
 
 class LocalBGEQueryEmbedder:
-    """按需加载本地 BGE；仅生成查询向量，不训练模型或重建 Chroma。"""
+    """使用本地 BGE 模型，把用户查询转换成向量，用于 Chroma 语义检索。"""
 
     def __init__(self, model_path: Path, *, batch_size: int = 32) -> None:
         self.model_path = model_path
@@ -294,7 +294,11 @@ class LocalBGEQueryEmbedder:
 
 
 class Neo4jMedicalKnowledgeTool:
-    """实现工作流 ``MedicalKnowledgeTool`` Protocol 的真实组合检索工具。"""
+    """实现工作流 ``MedicalKnowledgeTool`` Protocol 的真实组合检索工具。
+
+    MedicalEntityNormalizer	将用户文本转为标准实体与稳定 ID
+    Neo4jGraphRetriever	基于标准实体从 Neo4j 查询图谱关系
+    Neo4jMedicalKnowledgeTool	编排前两者、去重、统一输出"""
 
     def __init__(self, *, normalizer: MedicalEntityNormalizer, retriever: Neo4jGraphRetriever) -> None:
         self.normalizer = normalizer
@@ -309,19 +313,22 @@ class Neo4jMedicalKnowledgeTool:
     ) -> list[GraphEvidence]:
         """依次执行实体标准化和图查询，跨实体去重并限制总返回数量。"""
 
+        # 检查参数
         if intent not in INTENT_ENTITY_TYPES:
             raise ValueError(f"不支持的知识检索意图：{intent}")
         if not 1 <= limit <= 50:
             raise ValueError("limit 必须在 1 到 50 之间")
         expected_type = INTENT_ENTITY_TYPES[intent]
-        merged: dict[tuple[Any, ...], GraphEvidence] = {} # 来源实体 + 关系 + 目标实体
+        merged: dict[tuple[Any, ...], GraphEvidence] = {} # 来源实体 + 关系 + 目标实体\
+
+        # 去除重复、空白实体
         # dict.fromkeys 在保留患者输入顺序的同时去掉重复实体，减少数据库调用。
         for raw_entity in dict.fromkeys(item.strip() for item in entities if item.strip()):
             # MySQL精确标准化或Chroma语义标准化
             normalized = self.normalizer.normalize(raw_entity, expected_type)
             if normalized is None:
                 continue
-            # 执行 Neo4j 查询
+            # 在 Neo4j 查询图谱
             evidence = self.retriever.retrieve(
                 entity=normalized.standard_text,
                 entity_id=normalized.entity_id,

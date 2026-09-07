@@ -20,19 +20,16 @@ type StepState = "pending" | "current" | "done" | "failed" | "emergency";
 export function ProgressBar({
   response,
   hasError,
-  traceAvailable,
 }: {
   response: ConsultationResponse | null;
   hasError: boolean;
-  traceAvailable: boolean;
 }) {
-  const states: StepState[] = ["current", "pending", "pending", "pending"];
+  const states: StepState[] = ["current", "pending", "pending"];
   if (response?.conversation_status === "emergency_ended") {
     states[0] = "emergency";
   } else if (response?.conversation_status === "waiting_user") {
     states[0] = "done";
     states[1] = "current";
-    if (traceAvailable) states[2] = "done";
   } else if (response?.conversation_status === "completed") {
     states.fill("done");
   } else if (response?.conversation_status === "failed" || hasError) {
@@ -40,7 +37,7 @@ export function ProgressBar({
     states[1] = "failed";
   }
 
-  const labels = ["风险初筛", "信息采集", "知识参考", "信息整理"];
+  const labels = ["风险初筛", "预问诊采集", "信息整理"];
   const stateText: Record<StepState, string> = {
     pending: "未开始",
     current: "当前",
@@ -60,6 +57,37 @@ export function ProgressBar({
         </li>
       ))}
     </ol>
+  );
+}
+
+const urgencyLabels = {
+  routine: "常规",
+  urgent: "建议尽快就医",
+  emergency: "紧急",
+} as const;
+
+export function PreconsultStatus({
+  response,
+}: {
+  response: ConsultationResponse | null;
+}) {
+  if (response?.conversation_status !== "waiting_user" || !response.triage_result) return null;
+  const triage = response.triage_result;
+  return (
+    <section className={`preconsult-status preconsult-status--${triage.urgency}`} aria-label="预问诊状态">
+      <div>
+        <span>风险初筛</span>
+        <strong>{urgencyLabels[triage.urgency]}</strong>
+      </div>
+      <div>
+        <span>建议科室</span>
+        <strong>{triage.recommended_departments.join("、") || "待进一步确认"}</strong>
+      </div>
+      <div>
+        <span>信息采集</span>
+        <strong>已追问 {response.question_count} 轮</strong>
+      </div>
+    </section>
   );
 }
 
