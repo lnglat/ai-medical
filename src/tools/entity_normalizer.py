@@ -73,7 +73,7 @@ class MedicalEntityNormalizer:
     _MYSQL_SQL = (
         "SELECT id, std_name, entity_schema FROM entity_mapping "
         "WHERE synonym = %s AND entity_schema = %s "
-        "ORDER BY is_reviewed DESC LIMIT 1"
+        "LIMIT 1"
     )
 
     def __init__(
@@ -96,7 +96,7 @@ class MedicalEntityNormalizer:
     def normalize(self, text: str, entity_type: str) -> NormalizedEntity | None:
         """标准化一个实体；合法但确实无匹配时返回 ``None``。
 
-        精确查询会读取所有 离线医学数据清洗、实体对齐与索引构建 映射，而非只读取 ``is_reviewed=1`` 的历史人工词表；
+        精确查询会读取所有 离线医学数据清洗、实体对齐与索引构建 映射，而非只读取 ``review_status=1`` 的历史人工词表；
         这是因为自动映射也是 离线医学数据清洗、实体对齐与索引构建 正式产物的一部分。只有未精确命中时才计算查询向量。
         """
 

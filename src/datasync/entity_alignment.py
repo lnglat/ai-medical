@@ -214,7 +214,7 @@ def align_entities(
     的相似项绝不强制合并，只有处于审核区间的项会标记 ``needs_review``。
     """
     # reviewed_mapping 是 load_reviewed_mysql_mapping() 查出来的,来源是 MySQL 的 entity_mapping 表
-    # 且 SQL 里写了 WHERE is_reviewed = 1。
+    # 且 SQL 里写了 WHERE review_status = 1。
     reviewed_mapping = reviewed_mapping or {}
     result: list[EntityMappingRecord] = []
     for entity_type in sorted(counters): # counters:{"disease": Counter({"高血压": 1, "糖尿病": 1}),...}
@@ -233,7 +233,7 @@ def align_entities(
                     entity_id=stable_id(entity_type, reviewed), entity_type=entity_type,
                     original_text=term, standard_text=reviewed, source="mysql:entity_mapping",
                     method="reviewed_mysql", confidence=1.0, needs_review=False,
-                    rationale="命中 is_reviewed=1 的历史人工审核映射",
+                    rationale="命中 review_status=1 的历史人工审核映射",
                 ))
             else:
                 pending.append(term)

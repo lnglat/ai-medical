@@ -203,10 +203,10 @@ def load_reviewed_mysql_mapping(connection: Any) -> dict[tuple[str, str], str]:
 
     query = (
         "SELECT synonym, std_name, entity_schema FROM entity_mapping "
-        "WHERE is_reviewed = %s"
+        "WHERE review_status = %s"
     )
     with connection.cursor() as cursor:
-        cursor.execute(query, (1,)) # is_reviewed=1的执行
+        cursor.execute(query, (1,)) # review_status=1 的执行
         rows = cursor.fetchall()  # 一次性取回全部结果行
     # cursor 的配置决定,同一批查询的所有行类型必然一致,查一行就够
     if rows and not isinstance(rows[0], Mapping):
@@ -224,16 +224,17 @@ def apply_mysql_mappings(connection: Any, mappings: Sequence[EntityMappingRecord
 
     sql = (
         "INSERT INTO entity_mapping "
-        "(id, synonym, std_name, entity_schema, synonym_hash, is_reviewed) "
+        "(id, synonym, std_name, entity_schema, synonym_hash, review_status) "
         "VALUES (%s, %s, %s, %s, %s, %s) "
         "ON DUPLICATE KEY UPDATE "
-        "std_name=IF(is_reviewed=1, std_name, VALUES(std_name)), "
-        "id=IF(is_reviewed=1, id, VALUES(id))"
+        "std_name=IF(review_status=1, std_name, VALUES(std_name)), "
+        "id=IF(review_status=1, id, VALUES(id)), "
+        "review_status=IF(review_status=1, review_status, VALUES(review_status))"
     )
     values = [
         (item.entity_id, item.original_text, item.standard_text, item.entity_type,
          hashlib.sha256(item.original_text.encode("utf-8")).digest(),
-         1 if item.method == "reviewed_mysql" else 0)
+         1 if item.method == "reviewed_mysql" else (0 if item.needs_review else 2))
         for item in mappings
     ]
     with connection.cursor() as cursor:

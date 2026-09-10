@@ -140,7 +140,7 @@ def initialize_mysql(connection: Any, database: str) -> None:
             `std_name` TEXT NOT NULL,
             `entity_schema` VARCHAR(32) NOT NULL,
             `synonym_hash` BINARY(32) NOT NULL,
-            `is_reviewed` TINYINT(1) NOT NULL DEFAULT 0,
+            `review_status` TINYINT UNSIGNED NOT NULL DEFAULT 0,
             PRIMARY KEY (`entity_schema`, `synonym_hash`),
             KEY `idx_entity_mapping_id` (`id`),
             KEY `idx_entity_mapping_lookup` (`entity_schema`, `synonym`(191))

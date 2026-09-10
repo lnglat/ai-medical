@@ -57,7 +57,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--use-reviewed-mysql", action="store_true",
-        help="只读加载 MySQL 中 is_reviewed=1 的历史映射；失败时降级为空映射",
+        help="只读加载 MySQL 中 review_status=1 的历史人工审核映射；失败时降级为空映射",
     )
     parser.add_argument("--apply", action="store_true", help="把产物幂等增量写入既有数据库")
     parser.add_argument(
@@ -91,7 +91,7 @@ def _apply(output: Path) -> dict[str, int]:
         with get_mysql_connection() as connection:
             ''' 新词条：插入 entity_mapping 表；
                 同一个实体类型和同义词已存在：更新标准词和 ID；
-                如果已有记录被标记为 is_reviewed=1（人工审核），则保留人工审核结果，不会被本地数据覆盖；
+                如果已有记录被标记为 review_status=1（人工审核），则保留人工审核结果，不会被本地数据覆盖；
                 最后执行 connection.commit()，使 MySQL 写入真正生效。
                 返回的受影响行数 '''
             result["mysql_mappings"] = apply_mysql_mappings(connection, artifacts.mappings)

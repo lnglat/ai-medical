@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS `ai_medical`.`entity_mapping` (
   `std_name` TEXT NOT NULL COMMENT '完整标准实体名称',
   `entity_schema` VARCHAR(32) NOT NULL COMMENT '离线医学数据清洗、实体对齐与索引构建 entity_type',
   `synonym_hash` BINARY(32) NOT NULL COMMENT '完整 synonym 的 SHA-256，用于等价唯一键',
-  `is_reviewed` TINYINT(1) NOT NULL DEFAULT 0 COMMENT '1 表示人工审核，离线医学数据清洗、实体对齐与索引构建 upsert 不覆盖',
+  `review_status` TINYINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '0=待人工审核（低置信），1=已人工审核，2=高置信自动映射',
   PRIMARY KEY (`entity_schema`, `synonym_hash`),
   KEY `idx_entity_mapping_id` (`id`),
   KEY `idx_entity_mapping_lookup` (`entity_schema`, `synonym`(191))
