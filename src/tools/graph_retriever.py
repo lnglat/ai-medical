@@ -43,6 +43,42 @@ QUERY_TEMPLATES: dict[RetrievalIntent, str] = {
                coalesce(r.source_records, []) AS source_records
         LIMIT $limit
     """,
+    "symptom_to_differential": """
+        MATCH (input:Symptom)<-[input_rel:HAS_SYMPTOM]-(d:Disease)
+        WHERE input.id = $entity_id OR ($entity_id IS NULL AND input.name = $entity)
+        WITH input, d, input_rel
+        ORDER BY size(coalesce(input_rel.source_records, [])) DESC, d.name
+        LIMIT 3
+        CALL {
+            WITH input, d, input_rel
+            RETURN input.name AS source, input.id AS source_id,
+                   input.entity_type AS source_type, 'HAS_SYMPTOM' AS relation,
+                   d.name AS target, d.id AS target_id, d.entity_type AS target_type,
+                   coalesce(input_rel.source_records, []) AS source_records, 0 AS result_rank
+            UNION ALL
+            WITH input, d, input_rel
+            MATCH (d)-[symptom_rel:HAS_SYMPTOM]->(related:Symptom)
+            WITH d, symptom_rel, related ORDER BY related.name LIMIT 4
+            RETURN d.name AS source, d.id AS source_id, d.entity_type AS source_type,
+                   'HAS_SYMPTOM' AS relation,
+                   related.name AS target, related.id AS target_id,
+                   related.entity_type AS target_type,
+                   coalesce(symptom_rel.source_records, []) AS source_records, 1 AS result_rank
+            UNION ALL
+            WITH input, d, input_rel
+            MATCH (d)-[check_rel:RECOMMENDS_CHECK]->(check:Check)
+            WITH d, check_rel, check ORDER BY check.name LIMIT 3
+            RETURN d.name AS source, d.id AS source_id, d.entity_type AS source_type,
+                   'RECOMMENDS_CHECK' AS relation,
+                   check.name AS target, check.id AS target_id,
+                   check.entity_type AS target_type,
+                   coalesce(check_rel.source_records, []) AS source_records, 2 AS result_rank
+        }
+        RETURN source, source_id, source_type, relation, target, target_id,
+               target_type, source_records
+        ORDER BY result_rank, source, target
+        LIMIT $limit
+    """,
 }
 
 
@@ -75,7 +111,11 @@ class Neo4jGraphRetriever:
         intent: RetrievalIntent,
         limit: int = 5,
     ) -> list[GraphEvidence]:
-        """按白名单意图读取图谱，返回至多 ``limit`` 条可追溯证据。"""
+        """按白名单意图读取图谱，返回至多 ``limit`` 条可追溯证据。
+
+        组合意图固定最多展开 3 个候选方向，并为每个方向限制关联症状和检查，
+        防止高连接度节点无界放大结果。
+        """
 
         if intent not in QUERY_TEMPLATES:
             raise ValueError(f"不支持的图谱检索意图：{intent}")

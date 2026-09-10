@@ -78,7 +78,7 @@ class EmergencyResponse(BaseModel):
 
 
 class CompletedResponse(BaseModel):
-    """问诊信息已足够或达到最大轮数时返回摘要和病历草稿。"""
+    """问诊完成响应；摘要含安全筛选后的排查方向和图谱检查，证据不足时为空。"""
     model_config = ConfigDict(extra="forbid")
 
     conversation_status: Literal["completed"] = "completed"

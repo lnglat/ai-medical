@@ -28,6 +28,25 @@ export interface PreconsultSummary {
   missing_information: string[];
   triage_recommendation: string;
   safety_notice: string;
+  differential_directions: DifferentialDirection[];
+  possible_evaluations: PossibleEvaluation[];
+}
+
+export interface DifferentialDirection {
+  disease_name: string;
+  supporting_symptoms: string[];
+  conflicting_negative_symptoms: string[];
+  support_count: number;
+  conflict_count: number;
+  support_score: number;
+  notice: string;
+}
+
+export interface PossibleEvaluation {
+  check_name: string;
+  disease_direction: string;
+  evidence_source: string;
+  source_records: string[];
 }
 
 export interface MedicalRecordDraft {

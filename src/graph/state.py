@@ -34,6 +34,7 @@ class MedicalState(TypedDict, total=False):
     current_question: str | None  # 状态为 waiting_user 时，前端展示的唯一问题。
     question_count: int  # 已提出的问题数，用于限制无限追问。
     max_question_count: int  # 配置给出的单次问诊最大追问数。
+    differential_question_count: int  # 已展示的图谱鉴别追问数，独立限制为至多两轮。
     need_graph_retrieval: bool  # 预问诊节点只提出请求；检索节点才真正执行工具。
     retrieval_intent: RetrievalIntent | None  # 限制工具只能查询允许的知识关系。
     retrieval_entities: list[str]  # 本次检索使用的标准化前实体名称。

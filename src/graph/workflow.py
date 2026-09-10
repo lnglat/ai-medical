@@ -18,7 +18,9 @@ from src.agents.triage_agent import triage_node
 from src.config.settings import settings
 from src.graph.routers import route_after_preconsult, route_after_triage
 from src.graph.state import MedicalState
-from src.models.schemas import GraphEvidence
+from src.models.schemas import GraphEvidence, MedicalError
+from src.tools.entity_normalizer import EntityNormalizationError
+from src.tools.graph_retriever import GraphRetrievalError
 from src.tools.protocols import MedicalKnowledgeTool
 
 
@@ -62,6 +64,8 @@ def make_graph_retrieval_node(
         intent = state.get("retrieval_intent")
         # list[GraphEvidence] 是类型标注，说明它应该是“由 GraphEvidence 对象组成的列表”,实际赋值为[]
         evidence: list[GraphEvidence] = []
+        retrieval_errors: list[dict] = []
+        degraded = False
 
         if rag_enabled and entities and intent:
             '''
@@ -72,8 +76,23 @@ def make_graph_retrieval_node(
             # build_medical_graph 已保证启用 RAG 时必须注入真实工具；这里的断言
             # 同时帮助类型检查器理解 tool 不会是 None。
             assert tool is not None
-            evidence = tool.search(entities=entities, intent=intent)
-        return {
+            # 组合意图同时携带候选疾病、关联症状和检查，需要比单跳查询更高的
+            # 总证据上限；候选疾病数仍由只读 Cypher 固定限制为 3。
+            limit = 50 if intent == "symptom_to_differential" else 5
+            try:
+                evidence = tool.search(entities=entities, intent=intent, limit=limit)
+            except (EntityNormalizationError, GraphRetrievalError):
+                # 知识辅助不是完成基础预问诊的前置条件。运行期数据库/索引故障
+                # 记录为可审计降级，不伪造证据，也不把患者困在失败状态。
+                degraded = True
+                retrieval_errors.append(MedicalError(
+                    category="retrieval",
+                    code="knowledge_retrieval_degraded",
+                    message="医学知识检索暂时不可用，已继续完成基础预问诊。",
+                    retryable=True,
+                    node="graph_retrieval",
+                ).model_dump())
+        update = {
             "retrieved_evidence": [item.model_dump() for item in evidence],
             "need_graph_retrieval": False,
             # 保留 intent 作为“本轮已尝试检索”的标记；预问诊 Agent 据此不重复请求。
@@ -87,9 +106,13 @@ def make_graph_retrieval_node(
                     "retrieval_intent": intent,
                     "retrieval_entities": list(entities),
                     "evidence_count": len(evidence),
+                    "degraded": degraded,
                 }
             ],
         }
+        if retrieval_errors:
+            update["errors"] = retrieval_errors
+        return update
 
     return graph_retrieval_node
 

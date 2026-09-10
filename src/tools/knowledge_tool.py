@@ -41,6 +41,7 @@ INTENT_ENTITY_TYPES: dict[RetrievalIntent, str] = {
     "symptom_to_department": "symptom",
     "symptom_to_disease": "symptom",
     "disease_to_check": "disease",
+    "symptom_to_differential": "symptom",
 }
 ARTIFACT_FILES = {
     "cleaned_medical_records.jsonl", "entity_mapping.jsonl", "graph_nodes.jsonl",
@@ -354,8 +355,21 @@ class Neo4jMedicalKnowledgeTool:
                         "source_records": list(dict.fromkeys(previous.source_records + enriched.source_records)),
                         "score": max(previous.score or 0.0, enriched.score or 0.0),
                     })
-                if len(merged) >= limit:
+                if intent != "symptom_to_differential" and len(merged) >= limit:
                     return list(merged.values())
+        if intent == "symptom_to_differential":
+            # 所有患者阳性症状都先获得一次查询机会，再优先保留“输入症状→疾病”
+            # 支持边，避免首个高连接度症状耗尽预算导致后续症状无法参与共同支持。
+            def evidence_priority(item: GraphEvidence) -> tuple[int, str, str]:
+                if item.source_entity_type == "symptom" and item.target_entity_type == "disease":
+                    rank = 0
+                elif item.target_entity_type == "symptom":
+                    rank = 1
+                else:
+                    rank = 2
+                return rank, item.source_entity, item.target_entity
+
+            return sorted(merged.values(), key=evidence_priority)[:limit]
         return list(merged.values())
 
 

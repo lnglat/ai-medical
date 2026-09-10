@@ -70,6 +70,19 @@ _ACCOMPANYING_TERMS = (
 )
 # 否定词
 _NEGATION_PATTERN = re.compile(r"(?:没有|无|否认|未出现|不伴|并无|没|不是)")
+_AFFIRMATION_PATTERN = re.compile(r"(?:有|是|伴有|出现|会|存在|确实)")
+_SYMPTOM_ALIASES = {
+    "发烧": "发热",
+    "头疼": "头痛",
+    "喘不上气": "气促",
+    "呼吸急促": "气促",
+    "呼吸困难": "气促",
+}
+
+
+def _canonical_symptom(value: str) -> str:
+    text = value.strip()
+    return _SYMPTOM_ALIASES.get(text, text)
 
 
 # 标准问题表
@@ -155,6 +168,15 @@ def _question_field(question: str | None) -> str | None:
     return next((field for field, words in keyword_map if any(word in question for word in words)), None)
 
 
+def _question_symptom(question: str | None) -> str | None:
+    """读取确定性图谱追问中用中文引号标出的目标症状。"""
+
+    if not question:
+        return None
+    match = re.search(r"“([^”]+)”", question)
+    return match.group(1).strip() if match else None
+
+
 def _negative_value(field: str) -> str:
     """为宽泛的“没有”回答生成含义明确的阴性事实。"""
 
@@ -233,7 +255,15 @@ def extract_rule_slot_updates(
     if answered_field in _LIST_FIELDS:
         # 回答伴随症状
         if answered_field == "accompanying_symptoms":
+            target_symptom = _question_symptom(current_question)
             accompanying_facts = _extract_accompanying_facts(cleaned)
+            # “有/没有”这类省略回答必须绑定到上一轮明确询问的图谱症状，
+            # 否则既无法累计支持度，也可能在下一轮重复询问。
+            if target_symptom and not accompanying_facts:
+                if _NEGATION_PATTERN.search(cleaned):
+                    accompanying_facts = [f"否认{target_symptom}"]
+                elif _AFFIRMATION_PATTERN.search(cleaned):
+                    accompanying_facts = [target_symptom]
             if accompanying_facts:
                 updates[answered_field] = accompanying_facts
             # 没有识别出具体症状，但存在否定词
@@ -311,6 +341,27 @@ def merge_consultation_slots(
         if field in _LIST_FIELDS:
             additions = _as_clean_list(value)
             if additions:
+                # 症状的后续明确更正覆盖早先极性，避免同一标准症状既阳性又阴性。
+                if field in {"symptom", "accompanying_symptoms"}:
+                    for addition in additions:
+                        negative = _is_negative_symptom(addition)
+                        name = addition
+                        if negative:
+                            for prefix in ("否认", "没有", "未出现", "不伴", "并无"):
+                                if name.startswith(prefix):
+                                    name = name[len(prefix):].strip()
+                                    break
+                        canonical = _canonical_symptom(name)
+                        for symptom_field in ("symptom", "accompanying_symptoms"):
+                            merged[symptom_field] = [
+                                existing for existing in merged[symptom_field]
+                                if not (
+                                    _canonical_symptom(
+                                        existing.removeprefix("否认").strip()
+                                    ) == canonical
+                                    and _is_negative_symptom(existing) != negative
+                                )
+                            ]
                 # *merged[field] 和 *additions 是列表展开后拼接去重
                 merged[field] = list(dict.fromkeys([*merged[field], *additions]))
         elif field in _SCALAR_FIELDS and value is not None and str(value).strip():
@@ -340,16 +391,23 @@ def _evidence_symptom(state: Mapping[str, Any], slots: ConsultationSlots) -> str
     """从图谱证据中挑一个尚未由患者确认的症状，仅用于定向追问。"""
 
     # “否认发热”也代表发热这个字段已经问清，不能被图谱证据诱导后重复询问。
-    known = set(slots.symptom) | {
-        item.removeprefix("否认") for item in slots.accompanying_symptoms
+    known = {_canonical_symptom(item) for item in slots.symptom} | {
+        _canonical_symptom(item.removeprefix("否认")) for item in slots.accompanying_symptoms
     }
+    # 组合检索的症状来源实体是患者输入经实体标准化后的名称，也属于已知事实；
+    # 将其纳入可避免把“发烧→发热”再次作为新问题。
+    known.update(
+        _canonical_symptom(str(item.get("source_entity")))
+        for item in state.get("retrieved_evidence", []) or []
+        if item.get("source_entity_type") == "symptom" and item.get("source_entity")
+    )
     for item in state.get("retrieved_evidence", []) or []:
         candidates = (
             (item.get("source_entity"), item.get("source_entity_type")),
             (item.get("target_entity"), item.get("target_entity_type")),
         )
         for name, entity_type in candidates:
-            if entity_type == "symptom" and name and name not in known:
+            if entity_type == "symptom" and name and _canonical_symptom(str(name)) not in known:
                 return str(name)
     return None
 
@@ -375,6 +433,42 @@ def next_missing_question(
                 )
         return _QUESTIONS[field]
     return None
+
+
+def _differential_question(
+    state: Mapping[str, Any],
+    slots: ConsultationSlots,
+) -> str | None:
+    """在独立预算内选择一个尚未确认的图谱关联症状。"""
+
+    used = max(0, int(state.get("differential_question_count", 0)))
+    limit = max(0, int(settings.max_differential_question_count))
+    if used >= limit:
+        return None
+    symptom = _evidence_symptom(state, slots)
+    if not symptom:
+        return None
+    return (
+        f"为了补全症状信息，请确认是否伴有“{symptom}”？"
+        "这只是信息采集，不代表诊断。"
+    )
+
+
+def _is_negative_symptom(value: str) -> bool:
+    return value.strip().startswith(("否认", "没有", "未出现", "不伴", "并无"))
+
+
+def _confirmed_symptoms(slots: ConsultationSlots) -> list[str]:
+    """返回可用于组合检索的患者阳性症状，排除泛化回答和阴性事实。"""
+
+    values = [*slots.symptom, *slots.accompanying_symptoms]
+    return list(dict.fromkeys(
+        item.strip()
+        for item in values
+        if item.strip()
+        and not _is_negative_symptom(item)
+        and item.strip() not in {"有", "是", "伴有", "没有", "无"}
+    ))
 
 
 def _information_is_sufficient(
@@ -418,6 +512,11 @@ def _select_question(
         return deterministic_question
     if _question_field(candidate) != _question_field(deterministic_question):
         return deterministic_question
+    target_symptom = _question_symptom(deterministic_question)
+    if target_symptom and target_symptom not in candidate:
+        return deterministic_question
+    if target_symptom and "不代表诊断" not in candidate:
+        candidate += "这只是信息采集，不代表诊断。"
     return candidate
 
 
@@ -477,8 +576,8 @@ def _model_retrieval_request(
             if entity_type == "disease"
         }
     else:
-        # symptom_to_department 和 symptom_to_diseas 意图的起点必须是患者已确认的症状。
-        allowed = set(slots.symptom)
+        # 所有症状起点意图只能使用患者多轮明确确认的阳性症状。
+        allowed = set(_confirmed_symptoms(slots))
     entities = [item for item in _as_clean_list(decision.retrieval_entities) if item in allowed]
     return (decision.retrieval_intent, entities) if entities else None
 
@@ -489,25 +588,16 @@ def _choose_retrieval_request(
     decision: PreconsultDecision | None,
 ) -> tuple[RetrievalIntent, list[str]] | None:
     """产生结构化检索请求，且不重复历史上已经尝试过的相同请求。"""
-    # 先尝试使用模型请求
-    candidate = _model_retrieval_request(decision, state)
-    if candidate is None and slots.symptom:
-        # 找出历史已经查询的症状
-        covered = _previously_requested_entities(state, "symptom_to_department")
-        # 遍历证据的来源和目标实体，只把 entity_type == "symptom" 的名称加入 covered
-        covered.update(
-            str(value)
-            for item in state.get("retrieved_evidence", []) or []
-            for value, entity_type in (
-                (item.get("source_entity"), item.get("source_entity_type")),
-                (item.get("target_entity"), item.get("target_entity_type")),
-            )
-            if value and entity_type == "symptom"
-        )
-        # 只保留新症状
-        uncovered = [entity for entity in slots.symptom if entity not in covered]
-        if uncovered:
-            candidate = ("symptom_to_department", uncovered)
+    # 组合意图是预问诊主路径。只用历史请求签名判断覆盖情况，不能把图谱扩展出的
+    # 尚未确认症状误当成已经查询过的患者症状。
+    confirmed = _confirmed_symptoms(slots)
+    covered = _previously_requested_entities(state, "symptom_to_differential")
+    uncovered = [entity for entity in confirmed if entity not in covered]
+    candidate: tuple[RetrievalIntent, list[str]] | None = None
+    if uncovered:
+        candidate = ("symptom_to_differential", uncovered)
+    if candidate is None:
+        candidate = _model_retrieval_request(decision, state)
     if candidate is None:
         return None
     intent, entities = candidate
@@ -615,22 +705,29 @@ def preconsult_node(state: MedicalState) -> dict[str, Any]:
     max_rounds = max(0, int(state.get("max_question_count", settings.max_question_count)))
     # 建立包含新槽位的临时状态  '|'是 Python 的字典合并运算符，右侧同名字段覆盖左侧
     state_with_slots = dict(state) | {"consultation_slots": slots.model_dump()}
-    # 明确下一个问题内容
-    deterministic_question = next_missing_question(slots, state=state_with_slots)
+    sufficient = _information_is_sufficient(slots, state_with_slots)
+    reached_limit = rounds >= max_rounds
+    retrieval = None if reached_limit else _choose_retrieval_request(
+        state_with_slots, slots, model_decision
+    )
+    # 检索优先于结束判断，确保“首个/新增阳性症状→组合扩展”不会因为基础信息
+    # 已充分而被跳过。基础信息充分后只允许继续关键鉴别问题，不再填充可选槽位。
+    if retrieval:
+        deterministic_question = None
+    elif sufficient:
+        deterministic_question = _differential_question(state_with_slots, slots)
+    else:
+        deterministic_question = next_missing_question(slots, state=state_with_slots)
+        if _question_symptom(deterministic_question) and not _differential_question(
+            state_with_slots, slots
+        ):
+            deterministic_question = _QUESTIONS["accompanying_symptoms"]
     question = _select_question(
         deterministic_question,
         model_decision,
         previous_question=state.get("current_question"),
     )
-    sufficient = _information_is_sufficient(slots, state_with_slots)
-    # 模型可以建议结束，但代码仍以核心槽位是否充分为准；规则模式也使用同一标准。
-    # 结束条件达到最大追问数；已没有缺失问题；核心信息已经充分。
-    completed = rounds >= max_rounds or question is None or sufficient
-
-    # 决定是否提出 RAG 请求
-    retrieval = None if completed else _choose_retrieval_request(
-        state_with_slots, slots, model_decision
-    )
+    completed = reached_limit or (retrieval is None and question is None)
     # 根据检索元组更新retrieval_intent和retrieval_entities 并生成signature
     # 只有 _choose_retrieval_request 发现**"新的、还没查过的症状"**时才返回请求。大多数追问轮次根本不触发检索。
     need_retrieval = retrieval is not None
@@ -665,6 +762,9 @@ def preconsult_node(state: MedicalState) -> dict[str, Any]:
         "consultation_slots": slots.model_dump(),
         "current_question": None if completed or need_retrieval else question,
         "question_count": rounds if completed or need_retrieval else rounds + 1,
+        "differential_question_count": max(
+            0, int(state.get("differential_question_count", 0))
+        ) + (1 if not completed and not need_retrieval and _question_symptom(question) else 0),
         "need_graph_retrieval": need_retrieval,
         "retrieval_intent": retrieval_intent,
         "retrieval_entities": retrieval_entities,

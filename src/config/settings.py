@@ -39,7 +39,8 @@ class Settings(BaseSettings):
     deepseek_api_key: SecretStr | None = None
     deepseek_model: str = "deepseek-chat"
     embedding_device: str = "cpu"
-    max_question_count: int = 6
+    max_question_count: int = 8
+    max_differential_question_count: int = 2
     # 产品目标要求真实 RAG；单元测试如需隔离外部服务，应显式传入 rag_enabled=False。
     rag_enabled: bool = True
     llm_enabled: bool = True

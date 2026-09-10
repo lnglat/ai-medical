@@ -13,7 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 # Literal 将可选值限制为固定集合，避免不同 Agent 自行发明状态字符串。
 UrgencyLevel = Literal["emergency", "urgent", "routine"]
 ConversationStatus = Literal["triaging", "preconsulting", "waiting_user", "summarizing", "completed", "emergency_ended", "failed"]
-RetrievalIntent = Literal["symptom_to_department", "symptom_to_disease", "disease_to_check"]
+RetrievalIntent = Literal[
+    "symptom_to_department",
+    "symptom_to_disease",
+    "disease_to_check",
+    "symptom_to_differential",
+]
 ErrorCategory = Literal["validation", "state", "llm", "database", "retrieval", "internal"]
 KnowledgeEntityType = Literal[
     "disease", "symptom", "department", "check", "drug", "food", "cause", "people"
@@ -132,6 +137,33 @@ class PreconsultSummary(BaseModel):
     missing_information: list[str] = Field(default_factory=list)
     triage_recommendation: str
     safety_notice: str
+    differential_directions: list["DifferentialDirection"] = Field(default_factory=list)
+    possible_evaluations: list["PossibleEvaluation"] = Field(default_factory=list)
+
+
+class DifferentialDirection(BaseModel):
+    """由至少两个患者阳性症状共同支持的图谱排查方向，不是诊断。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    disease_name: str
+    supporting_symptoms: list[str] = Field(min_length=2)
+    conflicting_negative_symptoms: list[str] = Field(default_factory=list)
+    support_count: int = Field(ge=2)
+    conflict_count: int = Field(default=0, ge=0)
+    support_score: int
+    notice: str
+
+
+class PossibleEvaluation(BaseModel):
+    """与已保留排查方向绑定的图谱检查证据，不是检查医嘱。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    check_name: str
+    disease_direction: str
+    evidence_source: str
+    source_records: list[str] = Field(default_factory=list)
 
 
 class MedicalRecordDraft(BaseModel):

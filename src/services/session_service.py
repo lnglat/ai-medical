@@ -103,6 +103,7 @@ class SessionService:
             "current_question": None,
             "question_count": 0,
             "max_question_count": settings.max_question_count,
+            "differential_question_count": 0,
             "need_graph_retrieval": False,
             "retrieval_intent": None,
             "retrieval_entities": [],

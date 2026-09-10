@@ -152,6 +152,45 @@ export function SummaryPanel({
         <div><h3>明确否认</h3><TextList items={summary.key_negative_findings} /></div>
         <div><h3>仍需补充</h3><TextList items={summary.missing_information} empty="暂无" /></div>
       </div>
+      <section className="differential-section" aria-labelledby="differential-title">
+        <div className="section-heading">
+          <h3 id="differential-title">需由医生进一步排查的方向</h3>
+          <small>仅展示至少 2 项已确认症状共同支持的方向</small>
+        </div>
+        {summary.differential_directions.length ? (
+          <div className="direction-grid">
+            {summary.differential_directions.map((direction) => (
+              <article className="direction-card" key={direction.disease_name}>
+                <div className="direction-card__title">
+                  <strong>{direction.disease_name}</strong>
+                  <span>{direction.support_count} 项支持 · 净支持 {direction.support_score}</span>
+                </div>
+                <p>支持信息：{direction.supporting_symptoms.join("、")}</p>
+                <p>冲突信息：{direction.conflicting_negative_symptoms.join("、") || "暂无明确否认"}</p>
+              </article>
+            ))}
+          </div>
+        ) : <p className="empty-text">当前图谱证据不足，未形成可展示的排查方向</p>}
+      </section>
+      <section className="evaluation-section" aria-labelledby="evaluation-title">
+        <div className="section-heading">
+          <h3 id="evaluation-title">就诊时医生可能结合面诊情况评估的检查</h3>
+          <small>仅来自上述已保留方向的图谱关联</small>
+        </div>
+        {summary.possible_evaluations.length ? (
+          <ul className="evaluation-list">
+            {summary.possible_evaluations.map((evaluation) => (
+              <li key={`${evaluation.disease_direction}-${evaluation.check_name}`}>
+                <strong>{evaluation.check_name}</strong>
+                <span>关联方向：{evaluation.disease_direction}</span>
+              </li>
+            ))}
+          </ul>
+        ) : <p className="empty-text">暂无与已保留方向绑定的图谱检查信息</p>}
+      </section>
+      {summary.differential_directions[0]?.notice && (
+        <div className="safety-note">{summary.differential_directions[0].notice}</div>
+      )}
       <div className="safety-note">{summary.safety_notice}</div>
       <details className="record-details">
         <summary>查看病历草稿</summary>
