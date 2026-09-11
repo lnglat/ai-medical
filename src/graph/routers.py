@@ -20,8 +20,8 @@ def route_after_triage(state: MedicalState) -> Literal["emergency_end", "precons
 
 def route_after_preconsult(
     state: MedicalState,
-) -> Literal["retrieve", "ask_user", "summarize", "failed"]:
-    """根据预问诊状态选择检索、暂停、摘要或失败结束分支。"""
+) -> Literal["retrieve", "ask_user", "select_differential", "failed"]:
+    """根据预问诊状态选择鉴别检索、暂停、方向筛选或失败分支。"""
     # 存在“先失败、再检索、再等待、最后总结”的控制顺序
     if state.get("conversation_status") == "failed":
         return "failed"
@@ -29,4 +29,12 @@ def route_after_preconsult(
         return "retrieve"
     if state.get("conversation_status") == "waiting_user":
         return "ask_user"
-    return "summarize"
+    return "select_differential"
+
+
+def route_after_differential_selection(
+    state: MedicalState,
+) -> Literal["retrieve_checks", "summarize"]:
+    """只有确定性筛选得到最终方向时才进入检查检索。"""
+
+    return "retrieve_checks" if state.get("differential_directions") else "summarize"

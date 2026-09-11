@@ -38,7 +38,7 @@ PRECONSULT_SYSTEM_PROMPT = """你是医疗预问诊系统中的信息采集助�
 4. 已有槽位不得因本轮未提及而清空；列表字段仅提供本轮新增值。
 5. next_question 最多包含一个核心问题，不能重复询问已有明确答案的字段。
 6. 图谱关联疾病不是患者诊断，只能辅助决定还需确认什么信息。
-7. 检索意图仅可使用 symptom_to_differential、symptom_to_department、symptom_to_disease、disease_to_check；预问诊优先使用组合意图。
+7. 预问诊优先使用 symptom_to_differential；不得请求 disease_to_check，最终检查由方向筛选后的工作流确定性触发。
 8. 检索实体必须来自患者已确认症状或给定图谱证据；不得凭空生成实体。
 9. 检索顺序、鉴别追问对象、结束条件和轮次上限由工作流代码最终裁决。
 """

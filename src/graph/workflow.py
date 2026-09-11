@@ -12,13 +12,18 @@ from typing import Any
 from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 
+from src.agents.differential_selection import differential_selection_node
 from src.agents.preconsult_agent import preconsult_node
 from src.agents.summary_agent import summary_node
 from src.agents.triage_agent import triage_node
 from src.config.settings import settings
-from src.graph.routers import route_after_preconsult, route_after_triage
+from src.graph.routers import (
+    route_after_differential_selection,
+    route_after_preconsult,
+    route_after_triage,
+)
 from src.graph.state import MedicalState
-from src.models.schemas import GraphEvidence, MedicalError
+from src.models.schemas import DifferentialDirection, GraphEvidence, MedicalError
 from src.tools.entity_normalizer import EntityNormalizationError
 from src.tools.graph_retriever import GraphRetrievalError
 from src.tools.protocols import MedicalKnowledgeTool
@@ -35,6 +40,7 @@ class WorkflowNodes:
 
     triage: NodeCallable = triage_node
     preconsult: NodeCallable = preconsult_node
+    differential_selection: NodeCallable = differential_selection_node
     summary: NodeCallable = summary_node
 
 
@@ -43,18 +49,18 @@ def intake_node(state: MedicalState) -> dict:
     return {"conversation_status": "triaging", "audit_log": [{"node": "intake"}]}
 
 
-def make_graph_retrieval_node(
+def make_differential_retrieval_node(
     tool: MedicalKnowledgeTool | None,
     *,
     rag_enabled: bool,
 ) -> NodeCallable:
-    """创建绑定工具依赖的检索节点。
+    """创建症状鉴别检索节点；完成后只返回预问诊继续决策。
 
     节点从预问诊 Agent 写入状态的实体和意图读取请求；RAG 关闭时不调用工具。
     无论证据是否为空，都会清除本次检索请求，保证回到预问诊节点时不会死循环。
     """
 
-    def graph_retrieval_node(state: MedicalState) -> dict:
+    def differential_retrieval_node(state: MedicalState) -> dict:
         '''
         retrieval_entities：待查询实体，例如 ["头痛"]
         retrieval_intent：检索意图，例如 "symptom_to_department"
@@ -76,30 +82,41 @@ def make_graph_retrieval_node(
             # build_medical_graph 已保证启用 RAG 时必须注入真实工具；这里的断言
             # 同时帮助类型检查器理解 tool 不会是 None。
             assert tool is not None
-            # 组合意图同时携带候选疾病、关联症状和检查，需要比单跳查询更高的
-            # 总证据上限；候选疾病数仍由只读 Cypher 固定限制为 3。
+            # 组合意图只携带候选疾病和关联症状，需要比普通单跳查询更高的上限。
             limit = 50 if intent == "symptom_to_differential" else 5
             try:
                 evidence = tool.search(entities=entities, intent=intent, limit=limit)
+                if intent == "symptom_to_differential":
+                    evidence = [
+                        item for item in evidence
+                        if item.relation == "HAS_SYMPTOM"
+                        and {item.source_entity_type, item.target_entity_type}
+                        == {"symptom", "disease"}
+                    ]
             except (EntityNormalizationError, GraphRetrievalError):
                 # 知识辅助不是完成基础预问诊的前置条件。运行期数据库/索引故障
                 # 记录为可审计降级，不伪造证据，也不把患者困在失败状态。
                 degraded = True
                 retrieval_errors.append(MedicalError(
                     category="retrieval",
-                    code="knowledge_retrieval_degraded",
-                    message="医学知识检索暂时不可用，已继续完成基础预问诊。",
+                    code="differential_retrieval_degraded",
+                    message="症状鉴别检索暂时不可用，已继续完成基础预问诊。",
                     retryable=True,
-                    node="graph_retrieval",
+                    node="differential_retrieval",
                 ).model_dump())
+        evidence_field = (
+            "differential_evidence"
+            if intent == "symptom_to_differential"
+            else "retrieved_evidence"
+        )
         update = {
-            "retrieved_evidence": [item.model_dump() for item in evidence],
+            evidence_field: [item.model_dump() for item in evidence],
             "need_graph_retrieval": False,
             # 保留 intent 作为“本轮已尝试检索”的标记；预问诊 Agent 据此不重复请求。
             "retrieval_entities": [],
             "audit_log": [
                 {
-                    "node": "graph_retrieval",
+                    "node": "differential_retrieval",
                     "rag_enabled": rag_enabled,
                     # 检索后状态会清空 retrieval_entities；审计中保留最小请求摘要，
                     # 供 安全、错误处理与可观测性 只读 trace 展示，绝不保存完整患者消息。
@@ -114,7 +131,79 @@ def make_graph_retrieval_node(
             update["errors"] = retrieval_errors
         return update
 
-    return graph_retrieval_node
+    return differential_retrieval_node
+
+
+def make_check_retrieval_node(
+    tool: MedicalKnowledgeTool | None,
+    *,
+    rag_enabled: bool,
+) -> NodeCallable:
+    """只为确定性筛选后的最终方向查询检查，完成后直接进入摘要。"""
+
+    def check_retrieval_node(state: MedicalState) -> dict:
+        directions = [
+            DifferentialDirection.model_validate(item)
+            for item in state.get("differential_directions", []) or []
+        ][:3]
+        entities = [item.disease_name for item in directions]
+        evidence: list[GraphEvidence] = []
+        retrieval_errors: list[dict] = []
+        degraded = False
+        if rag_enabled and entities:
+            assert tool is not None
+            try:
+                evidence = tool.search(
+                    entities=entities,
+                    intent="disease_to_check",
+                    limit=9,
+                )
+                allowed = set(entities)
+                per_disease_count: dict[str, int] = {}
+                filtered: list[GraphEvidence] = []
+                for item in evidence:
+                    if (
+                        item.source_entity not in allowed
+                        or item.source_entity_type != "disease"
+                        or item.relation != "RECOMMENDS_CHECK"
+                        or item.target_entity_type != "check"
+                        or per_disease_count.get(item.source_entity, 0) >= 3
+                    ):
+                        continue
+                    filtered.append(item)
+                    per_disease_count[item.source_entity] = (
+                        per_disease_count.get(item.source_entity, 0) + 1
+                    )
+                evidence = filtered
+            except (EntityNormalizationError, GraphRetrievalError):
+                degraded = True
+                retrieval_errors.append(MedicalError(
+                    category="retrieval",
+                    code="check_retrieval_degraded",
+                    message="关联检查检索暂时不可用，已保留排查方向并继续整理摘要。",
+                    retryable=True,
+                    node="check_retrieval",
+                ).model_dump())
+        update: dict[str, Any] = {
+            "check_evidence": [item.model_dump() for item in evidence],
+            "retrieval_intent": "disease_to_check" if entities else None,
+            "retrieval_entities": [],
+            "need_graph_retrieval": False,
+            "conversation_status": "summarizing",
+            "audit_log": [{
+                "node": "check_retrieval",
+                "rag_enabled": rag_enabled,
+                "retrieval_intent": "disease_to_check",
+                "retrieval_entities": entities,
+                "evidence_count": len(evidence),
+                "degraded": degraded,
+            }],
+        }
+        if retrieval_errors:
+            update["errors"] = retrieval_errors
+        return update
+
+    return check_retrieval_node
 
 
 def emergency_end_node(state: MedicalState) -> dict:
@@ -153,8 +242,13 @@ def build_medical_graph(
     graph.add_node("triage", active_nodes.triage)
     graph.add_node("preconsult", active_nodes.preconsult)
     graph.add_node(
-        "graph_retrieval",
-        make_graph_retrieval_node(knowledge_tool, rag_enabled=active_rag_enabled),
+        "differential_retrieval",
+        make_differential_retrieval_node(knowledge_tool, rag_enabled=active_rag_enabled),
+    )
+    graph.add_node("differential_selection", active_nodes.differential_selection)
+    graph.add_node(
+        "check_retrieval",
+        make_check_retrieval_node(knowledge_tool, rag_enabled=active_rag_enabled),
     )
     graph.add_node("summary", active_nodes.summary)
     graph.add_node("emergency_end", emergency_end_node)
@@ -166,13 +260,22 @@ def build_medical_graph(
         "preconsult",
         route_after_preconsult,
         {
-            "retrieve": "graph_retrieval",
+            "retrieve": "differential_retrieval",
             "ask_user": END,
-            "summarize": "summary",
+            "select_differential": "differential_selection",
             "failed": END,
         },
     )
-    graph.add_edge("graph_retrieval", "preconsult")
+    graph.add_edge("differential_retrieval", "preconsult")
+    graph.add_conditional_edges(
+        "differential_selection",
+        route_after_differential_selection,
+        {
+            "retrieve_checks": "check_retrieval",
+            "summarize": "summary",
+        },
+    )
+    graph.add_edge("check_retrieval", "summary")
     graph.add_edge("summary", END)
     graph.add_edge("emergency_end", END)
     return graph.compile(checkpointer=checkpointer)

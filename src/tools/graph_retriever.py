@@ -64,15 +64,6 @@ QUERY_TEMPLATES: dict[RetrievalIntent, str] = {
                    related.name AS target, related.id AS target_id,
                    related.entity_type AS target_type,
                    coalesce(symptom_rel.source_records, []) AS source_records, 1 AS result_rank
-            UNION ALL
-            WITH input, d, input_rel
-            MATCH (d)-[check_rel:RECOMMENDS_CHECK]->(check:Check)
-            WITH d, check_rel, check ORDER BY check.name LIMIT 3
-            RETURN d.name AS source, d.id AS source_id, d.entity_type AS source_type,
-                   'RECOMMENDS_CHECK' AS relation,
-                   check.name AS target, check.id AS target_id,
-                   check.entity_type AS target_type,
-                   coalesce(check_rel.source_records, []) AS source_records, 2 AS result_rank
         }
         RETURN source, source_id, source_type, relation, target, target_id,
                target_type, source_records
@@ -113,8 +104,8 @@ class Neo4jGraphRetriever:
     ) -> list[GraphEvidence]:
         """按白名单意图读取图谱，返回至多 ``limit`` 条可追溯证据。
 
-        组合意图固定最多展开 3 个候选方向，并为每个方向限制关联症状和检查，
-        防止高连接度节点无界放大结果。
+        组合意图固定最多展开 3 个候选方向，并为每个方向限制关联症状；检查只在
+        方向筛选完成后通过 ``disease_to_check`` 单独查询。
         """
 
         if intent not in QUERY_TEMPLATES:

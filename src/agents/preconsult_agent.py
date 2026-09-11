@@ -20,6 +20,13 @@ from langchain_core.messages import BaseMessage, HumanMessage, SystemMessage
 
 from src.agents.prompts import PRECONSULT_SYSTEM_PROMPT, PRECONSULT_USER_PROMPT
 from src.config.settings import settings
+from src.domain.symptom_semantics import (
+    canonicalize_symptom,
+    has_negation_cue,
+    is_negative_statement,
+    parse_symptom,
+    term_is_negated,
+)
 from src.graph.state import MedicalState
 from src.models.schemas import (
     ConsultationSlots,
@@ -68,21 +75,7 @@ _ACCOMPANYING_TERMS = (
     "发热", "发烧", "头晕", "恶心", "呕吐", "腹泻", "咳嗽", "咳痰", "鼻塞",
     "流涕", "乏力", "心悸", "胸闷", "呼吸困难", "皮疹", "出血", "畏光",
 )
-# 否定词
-_NEGATION_PATTERN = re.compile(r"(?:没有|无|否认|未出现|不伴|并无|没|不是)")
 _AFFIRMATION_PATTERN = re.compile(r"(?:有|是|伴有|出现|会|存在|确实)")
-_SYMPTOM_ALIASES = {
-    "发烧": "发热",
-    "头疼": "头痛",
-    "喘不上气": "气促",
-    "呼吸急促": "气促",
-    "呼吸困难": "气促",
-}
-
-
-def _canonical_symptom(value: str) -> str:
-    text = value.strip()
-    return _SYMPTOM_ALIASES.get(text, text)
 
 
 # 标准问题表
@@ -205,21 +198,7 @@ def _term_is_negated(text: str, term: str) -> bool:
     “没有发热，但有呕吐”错误理解成同时否认发热和呕吐。
     """
 
-    # 同一症状被多次提及时采用最后一次陈述，例如“之前没有发热，后来发热了”
-    # 应以患者更新后的阳性状态为准。
-    position = text.rfind(term)
-    # 词不存在
-    if position < 0:
-        return False
-    clause_start = max(
-        # 在 term 之前找“最近的一个分隔符”的位置
-        (text.rfind(separator, 0, position) for separator in ("，", ",", "。", "；", ";", "但")),
-        default=-1,
-    )
-    # 截取 term 之前、最近分隔符之后的那一小段局部内容。
-    prefix = text[clause_start + 1:position]
-    # 只检查前面最近八个字符是否包含否定词
-    return bool(_NEGATION_PATTERN.search(prefix[-8:]))
+    return term_is_negated(text, term)
 
 
 def _extract_accompanying_facts(text: str) -> list[str]:
@@ -260,19 +239,19 @@ def extract_rule_slot_updates(
             # “有/没有”这类省略回答必须绑定到上一轮明确询问的图谱症状，
             # 否则既无法累计支持度，也可能在下一轮重复询问。
             if target_symptom and not accompanying_facts:
-                if _NEGATION_PATTERN.search(cleaned):
+                if has_negation_cue(cleaned):
                     accompanying_facts = [f"否认{target_symptom}"]
                 elif _AFFIRMATION_PATTERN.search(cleaned):
                     accompanying_facts = [target_symptom]
             if accompanying_facts:
                 updates[answered_field] = accompanying_facts
             # 没有识别出具体症状，但存在否定词
-            elif _NEGATION_PATTERN.search(cleaned):
+            elif has_negation_cue(cleaned):
                 updates[answered_field] = _negative_list_values(answered_field, cleaned)
             else:
                 updates[answered_field] = [cleaned]
         # 回答既往史、用药史或过敏史
-        elif answered_field != "symptom" and _NEGATION_PATTERN.search(cleaned):
+        elif answered_field != "symptom" and has_negation_cue(cleaned):
             updates[answered_field] = _negative_list_values(answered_field, cleaned)
         else:
             updates[answered_field] = [cleaned]
@@ -309,7 +288,9 @@ def extract_rule_slot_updates(
             updates["accompanying_symptoms"] = accompanying_facts
         # 首次咨询
         elif not current_question:
-            positive_facts = [item for item in accompanying_facts if not item.startswith("否认")]
+            positive_facts = [
+                item for item in accompanying_facts if not is_negative_statement(item)
+            ]
             if positive_facts:
                 updates["symptom"] = positive_facts
     # 没有提取到明确症状词，就把完整主诉作为症状。
@@ -341,27 +322,28 @@ def merge_consultation_slots(
         if field in _LIST_FIELDS:
             additions = _as_clean_list(value)
             if additions:
-                # 症状的后续明确更正覆盖早先极性，避免同一标准症状既阳性又阴性。
+                # 症状按共享标准名称做语义去重；后续极性更正覆盖旧事实，同极性
+                # 别名则保留先出现的患者原话，避免“发烧、发热”重复进入槽位。
                 if field in {"symptom", "accompanying_symptoms"}:
                     for addition in additions:
-                        negative = _is_negative_symptom(addition)
-                        name = addition
-                        if negative:
-                            for prefix in ("否认", "没有", "未出现", "不伴", "并无"):
-                                if name.startswith(prefix):
-                                    name = name[len(prefix):].strip()
-                                    break
-                        canonical = _canonical_symptom(name)
+                        parsed_addition = parse_symptom(addition)
+                        negative = parsed_addition.polarity == "negative"
+                        symptom_name = parsed_addition.name or addition.strip()
+                        same_polarity_exists = False
                         for symptom_field in ("symptom", "accompanying_symptoms"):
-                            merged[symptom_field] = [
-                                existing for existing in merged[symptom_field]
-                                if not (
-                                    _canonical_symptom(
-                                        existing.removeprefix("否认").strip()
-                                    ) == canonical
-                                    and _is_negative_symptom(existing) != negative
-                                )
-                            ]
+                            retained: list[str] = []
+                            for existing in merged[symptom_field]:
+                                existing_name = parse_symptom(existing).name or existing.strip()
+                                if existing_name != symptom_name:
+                                    retained.append(existing)
+                                elif is_negative_statement(existing) == negative:
+                                    same_polarity_exists = True
+                                    retained.append(existing)
+                            merged[symptom_field] = retained
+                        if not same_polarity_exists:
+                            merged[field].append(addition)
+                    merged[field] = list(dict.fromkeys(merged[field]))
+                    continue
                 # *merged[field] 和 *additions 是列表展开后拼接去重
                 merged[field] = list(dict.fromkeys([*merged[field], *additions]))
         elif field in _SCALAR_FIELDS and value is not None and str(value).strip():
@@ -387,27 +369,42 @@ def _slot_is_filled(slots: ConsultationSlots, field: str) -> bool:
     return bool(getattr(slots, field))
 
 
+def _differential_evidence(state: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """读取分阶段鉴别证据，并兼容改造前检查点中的症状关系。"""
+
+    staged = list(state.get("differential_evidence", []) or [])
+    legacy = [
+        item for item in state.get("retrieved_evidence", []) or []
+        if item.get("relation") == "HAS_SYMPTOM"
+    ]
+    return [*staged, *legacy]
+
+
 def _evidence_symptom(state: Mapping[str, Any], slots: ConsultationSlots) -> str | None:
     """从图谱证据中挑一个尚未由患者确认的症状，仅用于定向追问。"""
 
     # “否认发热”也代表发热这个字段已经问清，不能被图谱证据诱导后重复询问。
-    known = {_canonical_symptom(item) for item in slots.symptom} | {
-        _canonical_symptom(item.removeprefix("否认")) for item in slots.accompanying_symptoms
+    known = {parse_symptom(item).name for item in slots.symptom} | {
+        parse_symptom(item).name for item in slots.accompanying_symptoms
     }
-    # 组合检索的症状来源实体是患者输入经实体标准化后的名称，也属于已知事实；
-    # 将其纳入可避免把“发烧→发热”再次作为新问题。
+    known.discard(None)
+    # 组合检索的症状来源实体已由知识工具标准化，也属于已知事实。
     known.update(
-        _canonical_symptom(str(item.get("source_entity")))
-        for item in state.get("retrieved_evidence", []) or []
+        canonicalize_symptom(str(item.get("source_entity")).strip())
+        for item in _differential_evidence(state)
         if item.get("source_entity_type") == "symptom" and item.get("source_entity")
     )
-    for item in state.get("retrieved_evidence", []) or []:
+    for item in _differential_evidence(state):
         candidates = (
             (item.get("source_entity"), item.get("source_entity_type")),
             (item.get("target_entity"), item.get("target_entity_type")),
         )
         for name, entity_type in candidates:
-            if entity_type == "symptom" and name and _canonical_symptom(str(name)) not in known:
+            if (
+                entity_type == "symptom"
+                and name
+                and canonicalize_symptom(str(name)) not in known
+            ):
                 return str(name)
     return None
 
@@ -454,20 +451,17 @@ def _differential_question(
     )
 
 
-def _is_negative_symptom(value: str) -> bool:
-    return value.strip().startswith(("否认", "没有", "未出现", "不伴", "并无"))
-
-
 def _confirmed_symptoms(slots: ConsultationSlots) -> list[str]:
     """返回可用于组合检索的患者阳性症状，排除泛化回答和阴性事实。"""
 
     values = [*slots.symptom, *slots.accompanying_symptoms]
+    parsed = [parse_symptom(item) for item in values]
     return list(dict.fromkeys(
-        item.strip()
-        for item in values
-        if item.strip()
-        and not _is_negative_symptom(item)
-        and item.strip() not in {"有", "是", "伴有", "没有", "无"}
+        item.name
+        for item in parsed
+        if item.polarity == "positive"
+        and item.name
+        and item.name not in {"有", "是", "伴有"}
     ))
 
 
@@ -558,26 +552,12 @@ def _model_retrieval_request(
 
     if not decision or not decision.need_graph_retrieval or not decision.retrieval_intent:
         return None
-    slots = ConsultationSlots.model_validate(state.get("consultation_slots", {}))
-    # 从已有证据建立“实体名称 → 实体类型”映射
-    evidence_entity_types = {
-        str(value): entity_type
-        for item in state.get("retrieved_evidence", []) or []
-        for value, entity_type in (
-            (item.get("source_entity"), item.get("source_entity_type")),
-            (item.get("target_entity"), item.get("target_entity_type")),
-        )
-        if value
-    }
-    # 只允许使用图谱证据中类型为 disease 的实体
+    # 最终检查只能由方向筛选节点确定性触发，预问诊和模型不得提前查询。
     if decision.retrieval_intent == "disease_to_check":
-        allowed = {
-            entity for entity, entity_type in evidence_entity_types.items()
-            if entity_type == "disease"
-        }
-    else:
-        # 所有症状起点意图只能使用患者多轮明确确认的阳性症状。
-        allowed = set(_confirmed_symptoms(slots))
+        return None
+    slots = ConsultationSlots.model_validate(state.get("consultation_slots", {}))
+    # 所有症状起点意图只能使用患者多轮明确确认的阳性症状。
+    allowed = set(_confirmed_symptoms(slots))
     entities = [item for item in _as_clean_list(decision.retrieval_entities) if item in allowed]
     return (decision.retrieval_intent, entities) if entities else None
 
@@ -622,7 +602,7 @@ def _invoke_model(state: Mapping[str, Any], latest_text: str) -> PreconsultDecis
                 current_question=state.get("current_question") or "首次信息采集",
                 consultation_slots=json.dumps(state.get("consultation_slots", {}), ensure_ascii=False),
                 triage_result=json.dumps(state.get("triage_result") or {}, ensure_ascii=False),
-                retrieved_evidence=json.dumps(state.get("retrieved_evidence", []), ensure_ascii=False),
+                retrieved_evidence=json.dumps(_differential_evidence(state), ensure_ascii=False),
             )
         ),
     ]
@@ -652,7 +632,7 @@ def _is_returning_from_retrieval(state: Mapping[str, Any]) -> bool:
     """判断当前是否是同一轮检索后的回跳，避免重复调用一次大模型。"""
 
     audit_log = state.get("audit_log", []) or []
-    return bool(audit_log and audit_log[-1].get("node") == "graph_retrieval")
+    return bool(audit_log and audit_log[-1].get("node") == "differential_retrieval")
 
 
 def preconsult_node(state: MedicalState) -> dict[str, Any]:
@@ -674,7 +654,7 @@ def preconsult_node(state: MedicalState) -> dict[str, Any]:
     errors: list[dict[str, Any]] = []
     model_decision: PreconsultDecision | None = None
 
-    # graph_retrieval 完成后会立即回到本节点；槽位在检索前已经提取过，此时再次请求模型既浪费调用，也可能对同一患者文本产生不一致结果。
+    # differential_retrieval 完成后会立即回到本节点；槽位在检索前已经提取过，此时再次请求模型既浪费调用，也可能对同一患者文本产生不一致结果。
     returning_from_retrieval = _is_returning_from_retrieval(state)
     if settings.llm_enabled and not returning_from_retrieval:
         try:

@@ -192,23 +192,3 @@ class MedicalEntityNormalizer:
             method="chroma_semantic",
             score=max(0.0, min(1.0, 1.0 - numeric_distance)),
         )
-
-'''
-def normalize_medical_entity(text: str, entity_type: str) -> str | None:
-    """旧的 MySQL 精确标准化兼容入口；新代码应注入 ``MedicalEntityNormalizer``。
-
-    该函数不执行 Chroma 兜底，保留它只是为了避免已有调用方突然失效。
-    """
-
-    sql = MedicalEntityNormalizer._MYSQL_SQL
-    try:
-        with get_mysql_connection() as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(sql, (text.strip(), entity_type))
-                row = cursor.fetchone()
-    except Exception as exc:
-        raise EntityNormalizationError("mysql", str(exc)) from exc
-    if not row:
-        return None
-    return str(row["std_name"] if isinstance(row, Mapping) else row[1])
-    '''

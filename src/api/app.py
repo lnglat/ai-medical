@@ -142,17 +142,29 @@ def _state_to_trace(state: Mapping[str, Any]) -> DemoTraceResponse:
     audit = state.get("audit_log", []) or []
     retrieval_event: Mapping[str, Any] = {}
     for item in reversed(audit):
-        if isinstance(item, Mapping) and item.get("node") == "graph_retrieval":
+        if isinstance(item, Mapping) and item.get("node") in {
+            "differential_retrieval", "check_retrieval", "graph_retrieval",
+        }:
             retrieval_event = item
             break
 
     intent = state.get("retrieval_intent") or retrieval_event.get("retrieval_intent")
     raw_entities = state.get("retrieval_entities") or retrieval_event.get("retrieval_entities") or []
     retrieval_entities = [str(item) for item in raw_entities]
-    evidence = [
-        GraphEvidence.model_validate(item)
-        for item in (state.get("retrieved_evidence", []) or [])
-    ]
+    evidence_by_key: dict[tuple[str, str, str], GraphEvidence] = {}
+    for item in [
+        *(state.get("retrieved_evidence", []) or []),
+        *(state.get("differential_evidence", []) or []),
+        *(state.get("check_evidence", []) or []),
+    ]:
+        parsed = GraphEvidence.model_validate(item)
+        key = (
+            parsed.source_entity_id or parsed.source_entity,
+            parsed.relation,
+            parsed.target_entity_id or parsed.target_entity,
+        )
+        evidence_by_key[key] = parsed
+    evidence = list(evidence_by_key.values())
 
     normalizations: list[NormalizationTrace] = []
     seen: set[tuple[str, str, str]] = set()

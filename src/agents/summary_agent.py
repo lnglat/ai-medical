@@ -11,6 +11,7 @@ from typing import Any, Mapping
 
 from pydantic import BaseModel, ConfigDict
 
+from src.domain.symptom_semantics import is_negative_statement
 from src.graph.state import MedicalState
 from src.models.schemas import (
     ConsultationSlots,
@@ -23,11 +24,6 @@ from src.models.schemas import (
 
 
 SAFETY_NOTICE = "本摘要仅用于预问诊信息整理，不构成诊断或治疗建议。"
-DIFFERENTIAL_NOTICE = (
-    "以下内容来自症状与医学知识图谱的关联，仅供预问诊信息整理，"
-    "不代表诊断或检查医嘱。"
-)
-MAX_DIRECTIONS = 3
 MAX_EVALUATIONS_PER_DIRECTION = 3
 
 _FIELD_LABELS: dict[str, str] = {
@@ -45,24 +41,6 @@ _FIELD_LABELS: dict[str, str] = {
     "special_population": "特殊人群信息",
 }
 
-_NEGATIVE_PREFIXES = ("否认", "没有", "未出现", "不伴", "并无")
-
-# “无力”“无尿”等本身是阳性症状，不能仅因首字为“无”就判为否定。
-_POSITIVE_WU_TERMS = ("无力", "无尿", "无汗", "无痛性")
-_SYMPTOM_ALIASES = {
-    "发烧": "发热",
-    "头疼": "头痛",
-    "喘不上气": "气促",
-    "呼吸急促": "气促",
-    "呼吸困难": "气促",
-}
-
-
-def _canonical_symptom(value: str) -> str:
-    text = value.strip()
-    return _SYMPTOM_ALIASES.get(text, text)
-
-
 class SummaryBundle(BaseModel):
     """把确定性生成的摘要和病历草稿封装为一个内部结构化结果。"""
     # 禁止内部调用方传入未声明字段，保证容器只包含摘要和病历草稿。
@@ -78,15 +56,6 @@ def _clean_items(values: list[str]) -> list[str]:
     return list(dict.fromkeys(item.strip() for item in values if item.strip()))
 
 
-def _is_negative(value: str) -> bool:
-    """preconsult_agent 已明确保存的否定陈述；未知值不能被当成阴性。"""
-
-    text = value.strip()
-    if text.startswith(_POSITIVE_WU_TERMS):
-        return False
-    return text == "无" or text.startswith((*_NEGATIVE_PREFIXES, "无"))
-
-
 def _split_findings(slots: ConsultationSlots) -> tuple[list[str], list[str]]:
     """将槽位事实拆分为阳性与阴性发现，同时保留患者原始措辞。"""
 
@@ -94,9 +63,9 @@ def _split_findings(slots: ConsultationSlots) -> tuple[list[str], list[str]]:
     negatives: list[str] = []
     # * 是列表展开
     for value in [*slots.symptom, *slots.accompanying_symptoms]:
-        (negatives if _is_negative(value) else positives).append(value)
+        (negatives if is_negative_statement(value) else positives).append(value)
     for value in [*slots.medical_history, *slots.medication_history, *slots.allergy_history]:
-        if _is_negative(value):
+        if is_negative_statement(value):
             negatives.append(value)
     return _clean_items(positives), _clean_items(negatives)
 
@@ -141,7 +110,11 @@ def _standardized_symptom_entities(state: Mapping[str, Any]) -> list[str]:
 
     entities = [
         str(item.get("source_entity", "")).strip()
-        for item in state.get("retrieved_evidence", []) or []
+        for item in (
+            state.get("differential_evidence", [])
+            or state.get("retrieved_evidence", [])
+            or []
+        )
         # 函数只接受"symptom",只读取source_entity,不读取 target_entity
         if item.get("source_entity_type") == "symptom"
         and str(item.get("source_entity", "")).strip()
@@ -149,99 +122,32 @@ def _standardized_symptom_entities(state: Mapping[str, Any]) -> list[str]:
     return _clean_items(entities)
 
 
-def _negative_symptom_name(value: str) -> str | None:
-    """从具体阴性事实中取症状名；泛化否认不能参与疾病冲突计算。"""
+def _validated_directions(state: Mapping[str, Any]) -> list[DifferentialDirection]:
+    """读取方向筛选节点的确定性结果；摘要阶段不重复进行筛选。"""
 
-    text = value.strip()
-    for prefix in _NEGATIVE_PREFIXES:
-        if text.startswith(prefix):
-            symptom = text[len(prefix):].strip()
-            if symptom and symptom not in {
-                "其他伴随症状", "相关既往病史", "近期及长期用药", "已知过敏史",
-            }:
-                return symptom
-    return None
-
-
-def _patient_symptom_sets(
-    state: Mapping[str, Any],
-    slots: ConsultationSlots,
-) -> tuple[set[str], set[str]]:
-    """汇总多轮阳性/阴性症状，并吸收检索产生的阳性标准实体名。"""
-
-    positives = {
-        _canonical_symptom(value)
-        for value in [*slots.symptom, *slots.accompanying_symptoms]
-        if value.strip() and not _is_negative(value)
-    }
-    negatives = {
-        _canonical_symptom(symptom)
-        for value in [*slots.symptom, *slots.accompanying_symptoms]
-        if (symptom := _negative_symptom_name(value)) is not None
-    }
-    positives.update(
-        _canonical_symptom(value)
-        for value in _standardized_symptom_entities(state)
-        if _canonical_symptom(value) not in negatives
-    )
-    positives.difference_update(negatives)
-    return positives, negatives
-
-
-def _differential_outputs(
-    state: Mapping[str, Any],
-    slots: ConsultationSlots,
-) -> tuple[list[DifferentialDirection], list[PossibleEvaluation]]:
-    """按可解释规则筛选疾病方向，并只绑定这些方向的图谱检查。"""
-
-    positives, negatives = _patient_symptom_sets(state, slots)
-    disease_symptoms: dict[str, set[str]] = {}
-    disease_checks: dict[str, list[Mapping[str, Any]]] = {}
-
-    for item in state.get("retrieved_evidence", []) or []:
-        source = str(item.get("source_entity", "")).strip()
-        target = str(item.get("target_entity", "")).strip()
-        source_type = item.get("source_entity_type")
-        target_type = item.get("target_entity_type")
-        relation = item.get("relation")
-        if relation == "HAS_SYMPTOM" and source_type == "symptom" and target_type == "disease":
-            disease_symptoms.setdefault(target, set()).add(_canonical_symptom(source))
-        elif relation == "HAS_SYMPTOM" and source_type == "disease" and target_type == "symptom":
-            disease_symptoms.setdefault(source, set()).add(_canonical_symptom(target))
-        elif relation == "RECOMMENDS_CHECK" and source_type == "disease" and target_type == "check":
-            disease_checks.setdefault(source, []).append(item)
-
-    ranked: list[tuple[int, int, int, str, list[str], list[str]]] = []
-    for disease, related_symptoms in disease_symptoms.items():
-        supporting = sorted(related_symptoms & positives)
-        if len(supporting) < 2:
-            continue
-        conflicting = sorted(related_symptoms & negatives)
-        support_count = len(supporting)
-        conflict_count = len(conflicting)
-        ranked.append((
-            support_count - conflict_count,
-            support_count,
-            conflict_count,
-            disease,
-            supporting,
-            conflicting,
-        ))
-    ranked.sort(key=lambda row: (-row[0], -row[1], row[2], row[3]))
-
-    directions = [
-        DifferentialDirection(
-            disease_name=disease,
-            supporting_symptoms=supporting,
-            conflicting_negative_symptoms=conflicting,
-            support_count=support_count,
-            conflict_count=conflict_count,
-            support_score=support_score,
-            notice=DIFFERENTIAL_NOTICE,
-        )
-        for support_score, support_count, conflict_count, disease, supporting, conflicting
-        in ranked[:MAX_DIRECTIONS]
+    return [
+        DifferentialDirection.model_validate(item)
+        for item in state.get("differential_directions", []) or []
     ]
+
+
+def _possible_evaluations(
+    state: Mapping[str, Any],
+    directions: list[DifferentialDirection],
+) -> list[PossibleEvaluation]:
+    """只绑定最终方向对应的检查证据，每个方向至多三项。"""
+
+    allowed_diseases = {item.disease_name for item in directions}
+    disease_checks: dict[str, list[Mapping[str, Any]]] = {}
+    for item in state.get("check_evidence", []) or []:
+        disease = str(item.get("source_entity", "")).strip()
+        if (
+            item.get("relation") == "RECOMMENDS_CHECK"
+            and item.get("source_entity_type") == "disease"
+            and item.get("target_entity_type") == "check"
+            and disease in allowed_diseases
+        ):
+            disease_checks.setdefault(disease, []).append(item)
 
     evaluations: list[PossibleEvaluation] = []
     for direction in directions:
@@ -261,7 +167,7 @@ def _differential_outputs(
             ))
             if len(seen_checks) >= MAX_EVALUATIONS_PER_DIRECTION:
                 break
-    return directions, evaluations
+    return evaluations
 
 
 def _fact_source_paths() -> dict[str, list[str]]:
@@ -278,12 +184,11 @@ def _fact_source_paths() -> dict[str, list[str]]:
         "summary.missing_information": ["state.consultation_slots"],
         "summary.triage_recommendation": ["state.triage_result"],
         "summary.differential_directions": [
-            "state.consultation_slots",
-            "state.retrieved_evidence[relation=HAS_SYMPTOM]",
+            "state.differential_directions",
         ],
         "summary.possible_evaluations": [
-            "summary.differential_directions",
-            "state.retrieved_evidence[relation=RECOMMENDS_CHECK]",
+            "state.differential_directions",
+            "state.check_evidence[relation=RECOMMENDS_CHECK]",
         ],
         "medical_record_draft": [
             "state.chief_complaint",
@@ -291,7 +196,7 @@ def _fact_source_paths() -> dict[str, list[str]]:
             "state.triage_result",
         ],
         "medical_record_draft.note.standardized_symptom_entities": [
-            "state.retrieved_evidence[*].source_entity[type=symptom]",
+            "state.differential_evidence[*].source_entity[type=symptom]",
         ],
     }
 
@@ -316,7 +221,8 @@ def build_template_bundle(
     medication = "、".join(_clean_items(slots.medication_history)) or "未提供"
     allergy = "、".join(_clean_items(slots.allergy_history)) or "未提供"
     standardized_symptoms = _standardized_symptom_entities(state)
-    differential_directions, possible_evaluations = _differential_outputs(state, slots)
+    differential_directions = _validated_directions(state)
+    possible_evaluations = _possible_evaluations(state, differential_directions)
     note = SAFETY_NOTICE
     if standardized_symptoms:
         note += (
@@ -383,6 +289,9 @@ def summary_node(state: MedicalState) -> dict[str, Any]:
     update: dict[str, Any] = {
         "summary": result.summary.model_dump(),
         "medical_record_draft": result.medical_record_draft.model_dump(),
+        "possible_evaluations": [
+            item.model_dump() for item in result.summary.possible_evaluations
+        ],
         "conversation_status": "completed",
         "current_question": None,
         "audit_log": [{

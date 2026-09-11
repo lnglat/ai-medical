@@ -330,11 +330,13 @@ class Neo4jMedicalKnowledgeTool:
             if normalized is None:
                 continue
             # 在 Neo4j 查询图谱
+            # 最终方向检查每个疾病最多取 3 条，确保至多 3 个方向都获得查询机会。
+            query_limit = 3 if intent == "disease_to_check" else limit
             evidence = self.retriever.retrieve(
                 entity=normalized.standard_text,
                 entity_id=normalized.entity_id,
                 intent=intent,
-                limit=limit,
+                limit=query_limit,
             )
             for item in evidence:
                 # model_copy复制一个模型对象，并且可以在复制时修改部分字段；原对象保持不变
@@ -355,7 +357,7 @@ class Neo4jMedicalKnowledgeTool:
                         "source_records": list(dict.fromkeys(previous.source_records + enriched.source_records)),
                         "score": max(previous.score or 0.0, enriched.score or 0.0),
                     })
-                if intent != "symptom_to_differential" and len(merged) >= limit:
+                if intent not in {"symptom_to_differential", "disease_to_check"} and len(merged) >= limit:
                     return list(merged.values())
         if intent == "symptom_to_differential":
             # 所有患者阳性症状都先获得一次查询机会，再优先保留“输入症状→疾病”
@@ -370,6 +372,8 @@ class Neo4jMedicalKnowledgeTool:
                 return rank, item.source_entity, item.target_entity
 
             return sorted(merged.values(), key=evidence_priority)[:limit]
+        if intent == "disease_to_check":
+            return list(merged.values())[:limit]
         return list(merged.values())
 
 

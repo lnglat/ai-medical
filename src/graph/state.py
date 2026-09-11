@@ -31,6 +31,10 @@ class MedicalState(TypedDict, total=False):
     triage_result: dict | None  # TriageResult 的字典，供路由和摘要读取。
     # 多次检索的证据需要保留，因此用 operator.add 拼接而非覆盖。
     retrieved_evidence: Annotated[list[dict], operator.add]
+    differential_evidence: Annotated[list[dict], operator.add]
+    differential_directions: list[dict]
+    check_evidence: Annotated[list[dict], operator.add]
+    possible_evaluations: list[dict]
     current_question: str | None  # 状态为 waiting_user 时，前端展示的唯一问题。
     question_count: int  # 已提出的问题数，用于限制无限追问。
     max_question_count: int  # 配置给出的单次问诊最大追问数。
